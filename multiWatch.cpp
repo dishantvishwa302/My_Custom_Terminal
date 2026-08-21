@@ -1,7 +1,7 @@
 #include <iostream>
-#include <vector>
-#include <string>
 #include <sstream>
+#include <string>
+#include <vector>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <poll.h>
@@ -9,148 +9,161 @@
 #include <chrono>
 #include <iomanip>
 #include <cstring>
-#include <algorithm>
+#include <ctime>
+#include <cerrno>
 
-// A global list of child process IDs to terminate on Ctrl+C
-std::vector<pid_t> child_pids;
+static std::vector<pid_t> g_children;
 
-// Signal handler for Ctrl+C (SIGINT)
-void handle_sigint(int signal_num) {
-    (void)signal_num; // Unused parameter
-    std::cout << "\n[multiWatch] Ctrl+C received. Terminating child processes..." << std::endl;
-    for (pid_t pid : child_pids) {
+static void on_sigint(int) {
+    std::cout << "\n[multiWatch] Ctrl+C — stopping children...\n";
+    for (pid_t pid : g_children) {
         if (pid > 0) {
-            kill(pid, SIGTERM); // Send termination signal to each child
+            kill(pid, SIGTERM);
         }
     }
 }
 
-// Function to get a formatted timestamp string
-std::string get_timestamp() {
+static std::string timestamp() {
     auto now = std::chrono::system_clock::now();
-    auto in_time_t = std::chrono::system_clock::to_time_t(now);
-    std::stringstream ss;
-    ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%d %X");
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    std::ostringstream ss;
+    ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
     return ss.str();
 }
 
-// Helper function to trim leading/trailing whitespace from a string
-std::string trim(const std::string& str) {
-    const std::string whitespace = " \t";
-    const auto strBegin = str.find_first_not_of(whitespace);
-    if (strBegin == std::string::npos) return ""; // No content
-    const auto strEnd = str.find_last_not_of(whitespace);
-    const auto strRange = strEnd - strBegin + 1;
-    return str.substr(strBegin, strRange);
+static std::string trim(const std::string& s) {
+    const auto a = s.find_first_not_of(" \t");
+    if (a == std::string::npos) {
+        return "";
+    }
+    const auto b = s.find_last_not_of(" \t");
+    return s.substr(a, b - a + 1);
 }
 
-// Main function to parse the specific "[cmd1, cmd2, ...]" format
-std::vector<std::string> parse_command_string(const std::string& full_arg) {
-    std::vector<std::string> commands;
-    std::string content = trim(full_arg);
-
-    // 1. Strip the outer brackets
-    if (content.front() == '[' && content.back() == ']') {
-        content = content.substr(1, content.length() - 2);
-    } else {
-        std::cerr << "Error: Commands must be enclosed in brackets [ ]." << std::endl;
-        return commands;
+// Parse:  [cmd1, cmd2, cmd3]
+static std::vector<std::string> parse_commands(const std::string& arg) {
+    std::vector<std::string> cmds;
+    std::string s = trim(arg);
+    if (s.size() < 2 || s.front() != '[' || s.back() != ']') {
+        std::cerr << "Usage: multiWatch [cmd1, cmd2, ...]\n";
+        return cmds;
     }
+    s = s.substr(1, s.size() - 2);
 
-    // 2. Split the string by commas
-    std::stringstream ss(content);
-    std::string segment;
-    while(std::getline(ss, segment, ',')) {
-        std::string trimmed_cmd = trim(segment);
-        if (!trimmed_cmd.empty()) {
-            commands.push_back(trimmed_cmd);
+    std::stringstream ss(s);
+    std::string part;
+    while (std::getline(ss, part, ',')) {
+        part = trim(part);
+        if (!part.empty() && part.front() == '"' && part.back() == '"' && part.size() >= 2) {
+            part = part.substr(1, part.size() - 2);
+        }
+        if (!part.empty()) {
+            cmds.push_back(part);
         }
     }
-    return commands;
+    return cmds;
 }
 
+static void print_chunk(const std::string& cmd, const char* buf) {
+    std::cout << "\"" << cmd << "\", " << timestamp() << " :\n"
+              << "----------------------------------------------------\n"
+              << buf
+              << "----------------------------------------------------\n"
+              << std::flush;
+}
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: multiWatch [cmd1, cmd2, ...]" << std::endl;
+        std::cerr << "Usage: multiWatch [cmd1, cmd2, ...]\n";
         return 1;
     }
 
-    // 1. Reassemble the arguments into a single string
-    std::string full_command_arg;
+    std::string joined;
     for (int i = 1; i < argc; ++i) {
-        full_command_arg += argv[i];
-        if (i < argc - 1) {
-            full_command_arg += " ";
+        if (i > 1) {
+            joined += " ";
         }
+        joined += argv[i];
     }
 
-    // 2. Parse the reassembled string to get individual commands
-    std::vector<std::string> commands = parse_command_string(full_command_arg);
+    std::vector<std::string> commands = parse_commands(joined);
     if (commands.empty()) {
         return 1;
     }
 
-    // Register the Ctrl+C signal handler
-    signal(SIGINT, handle_sigint);
+    signal(SIGINT, on_sigint);
 
-    int num_commands = commands.size();
-    std::vector<struct pollfd> pfds(num_commands);
-    child_pids.clear(); // Clear global PIDs
+    const int n = static_cast<int>(commands.size());
+    std::vector<pollfd> pfds(n);
 
-    // 3. The rest of the logic is the same: fork and execute each parsed command
-    for (int i = 0; i < num_commands; ++i) {
+    for (int i = 0; i < n; ++i) {
         int pipefd[2];
-        if (pipe(pipefd) == -1) { /* ... error handling ... */ }
+        if (pipe(pipefd) < 0) {
+            perror("pipe");
+            return 1;
+        }
 
         pid_t pid = fork();
-        if (pid == 0) { // --- Child Process ---
+        if (pid < 0) {
+            perror("fork");
+            return 1;
+        }
+        if (pid == 0) {
             signal(SIGINT, SIG_DFL);
             close(pipefd[0]);
             dup2(pipefd[1], STDOUT_FILENO);
             dup2(pipefd[1], STDERR_FILENO);
             close(pipefd[1]);
-            execlp("bash", "bash", "-c", commands[i].c_str(), nullptr);
+            execlp("bash", "bash", "-c", commands[static_cast<size_t>(i)].c_str(),
+                   static_cast<char*>(nullptr));
             perror("execlp");
-            exit(1);
-        } else { // --- Parent Process ---
-            close(pipefd[1]);
-            pfds[i].fd = pipefd[0];
-            pfds[i].events = POLLIN;
-            child_pids.push_back(pid);
+            _exit(1);
         }
+
+        close(pipefd[1]);
+        pfds[static_cast<size_t>(i)].fd = pipefd[0];
+        pfds[static_cast<size_t>(i)].events = POLLIN;
+        g_children.push_back(pid);
     }
-    
-    // --- The poll loop remains the same ---
-    int active_children = num_commands;
-    while (active_children > 0) {
-        int ret = poll(pfds.data(), num_commands, -1);
+
+    int alive = n;
+    while (alive > 0) {
+        int ret = poll(pfds.data(), static_cast<nfds_t>(n), -1);
         if (ret < 0) {
-            if (errno == EINTR) break;
+            if (errno == EINTR) {
+                break;
+            }
             perror("poll");
             break;
         }
 
-        for (int i = 0; i < num_commands; ++i) {
-            if (pfds[i].fd != -1 && pfds[i].revents & POLLIN) {
-                char buffer[4096];
-                ssize_t bytes_read = read(pfds[i].fd, buffer, sizeof(buffer) - 1);
-                if (bytes_read > 0) {
-                    buffer[bytes_read] = '\0';
-                    std::cout << "\"" << commands[i] << "\", " << get_timestamp() << ":\n" << buffer << std::flush;
+        for (int i = 0; i < n; ++i) {
+            if (pfds[i].fd == -1) {
+                continue;
+            }
+            if (pfds[i].revents & POLLIN) {
+                char buf[4096];
+                ssize_t bytes = read(pfds[i].fd, buf, sizeof(buf) - 1);
+                if (bytes > 0) {
+                    buf[bytes] = '\0';
+                    print_chunk(commands[static_cast<size_t>(i)], buf);
                 }
             }
-            if (pfds[i].fd != -1 && pfds[i].revents & (POLLHUP | POLLERR)) {
+            if (pfds[i].revents & (POLLHUP | POLLERR)) {
                 close(pfds[i].fd);
                 pfds[i].fd = -1;
-                active_children--;
+                --alive;
             }
         }
     }
 
-    for (pid_t pid : child_pids) {
-        if (pid > 0) waitpid(pid, nullptr, 0);
+    for (pid_t pid : g_children) {
+        if (pid > 0) {
+            waitpid(pid, nullptr, 0);
+        }
     }
-    std::cout << "[multiWatch] All commands finished." << std::endl;
+    std::cout << "[multiWatch] All commands finished.\n";
     return 0;
 }

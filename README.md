@@ -1,53 +1,60 @@
-# MyTerm — Custom Linux Shell + GUI Terminal  
-### CS69201 — Computing Lab Project  
+# MyTerm — Custom Linux Terminal
 
----
+X11 window + your own shell. Run `./myterm` and you are already in `myshell` (`user@myterm>`).
 
-## 🧩 Project Structure
+## What you get
 
-| File | Description |
-|------|--------------|
-| `myterm.cpp` | Main shell logic + GUI integration using Xlib and PTYs |
-| `history.cpp` | Maintains shell command history (load, save, append) |
-| `hsearch.cpp` | Implements interactive searchable history (Ctrl+R style) |
-| `multiWatch.cpp` | Executes multiple commands in parallel (like `watch`) |
+| Binary | What it is |
+|--------|------------|
+| `myterm` | X11 window. Keys go to a PTY; the child is **myshell**, not bash |
+| `myshell` | Your shell: `fork` / `execvp` / `pipe` / `dup2` |
+| `history` | Last 1000 commands from `~/.myterm_history` |
+| `hsearch` | Ctrl+R history search |
+| `multiWatch` | Run several commands in parallel |
 
----
+## Build
 
-## 🏗️ Compilation Instructions
-
-Ensure you have all required development libraries installed:
+```bash
 sudo apt update
 sudo apt install g++ libx11-dev libutil-dev
 
+make
+```
 
-Then compile using:
-g++ -std=c++17 -Wall -Wextra -lX11 -lutil -o myterm myterm.cpp history.cpp hsearch.cpp multiWatch.cpp
+Needs a graphical session (`DISPLAY` set). On Wayland, Xwayland is enough.
 
----
+Build **both** `myterm` and `myshell`. The window starts `myshell` from `PATH` (the folder that contains `./myterm` is prepended).
 
-## ▶️ Running the Shell
+## Run
 
-To start the shell:
+```bash
 ./myterm
+```
 
+| Try this | What it shows |
+|----------|----------------|
+| `ls`, `cd`, `ls \| wc -l` | your shell: fork, exec, pipe |
+| `echo hi > /tmp/a.txt` then `cat < /tmp/a.txt` | redirection (`dup2`) |
+| `sleep 5 &` | background job |
+| `history` | last 1000 commands |
+| Ctrl+R | `hsearch` |
+| `multiWatch [ls, date]` | parallel commands + timestamps |
+| `exit` or close the window | quit |
 
-To exit:
+Do **not** compile every `.cpp` into one binary. Each helper has its own `main()`.
 
-exit
-or
-CTRL + SHIFT + W
+## Project files
 
+```
+myterm.cpp      main() — locale, then start the GUI
+gui.cpp         X11 window, keys, drawing
+pty.cpp         openpty + fork + myshell
+ansi.cpp        strip OSC / CSI so color codes are not drawn as junk
+myshell.cpp     the shell (this is the interview file)
+history.cpp     history command
+hsearch.cpp     history search
+multiWatch.cpp  parallel watch
+histpath.h      shared path: ~/.myterm_history
+```
 
-
-## How to Clean & Rebuild
-
-To clean build artifacts:
-rm myterm
-
-
-Then rebuild:
-g++ -std=c++17 -Wall -Wextra -lX11 -lutil -o myterm myterm.cpp history.cpp hsearch.cpp multiWatch.cpp
-
----
-
+See `GUIDE.md` for what changed, and `DESIGNDOC.md` for how each feature works.

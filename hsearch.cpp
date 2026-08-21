@@ -1,109 +1,107 @@
+#include "histpath.h"
+
 #include <iostream>
 #include <fstream>
-#include <vector>
 #include <string>
-#include <cstdlib>
-#include <algorithm>
+#include <vector>
 #include <unistd.h>
 #include <termios.h>
+#include <stdlib.h>
 
-// --- Terminal Control Functions ---
 struct termios orig_termios;
 
-void disableRawMode() {
+static void disable_raw() {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
 }
 
-void enableRawMode() {
+static void enable_raw() {
     tcgetattr(STDIN_FILENO, &orig_termios);
-    atexit(disableRawMode); // Ensure raw mode is disabled on exit
+    atexit(disable_raw);
     struct termios raw = orig_termios;
     raw.c_lflag &= ~(ECHO | ICANON);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
-// --- History Search Logic (mostly the same) ---
-std::vector<std::string> read_history_file() {
+static std::vector<std::string> read_history() {
     std::vector<std::string> history;
-    const char* home_dir = getenv("HOME");
-    if (!home_dir) return history;
-    std::string history_file_path = std::string(home_dir) + "/.bash_history";
-    std::ifstream history_file(history_file_path);
+    std::ifstream in(myterm_history_path());
     std::string line;
-    while (std::getline(history_file, line)) {
+    while (std::getline(in, line)) {
         history.push_back(line);
     }
     return history;
 }
 
-int longest_common_substring_length(const std::string& a, const std::string& b) {
-    int max_len = 0;
-    // (This function remains the same as before)
-    for (size_t i = 0; i < a.length(); ++i) {
-        for (size_t j = 0; j < b.length(); ++j) {
+// Longest common substring length (consecutive characters, not subsequence).
+static int lcs_len(const std::string& a, const std::string& b) {
+    int best = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        for (size_t j = 0; j < b.size(); ++j) {
             int len = 0;
-            while (i + len < a.length() && j + len < b.length() && a[i + len] == b[j + len]) {
-                len++;
+            while (i + len < a.size() && j + len < b.size() && a[i + len] == b[j + len]) {
+                ++len;
             }
-            if (len > max_len) max_len = len;
+            if (len > best) {
+                best = len;
+            }
         }
     }
-    return max_len;
+    return best;
 }
 
-// --- Main Function with Manual Input Handling ---
 int main() {
-    enableRawMode(); // Take control of the terminal
-
+    enable_raw();
     std::cout << "Enter search term: " << std::flush;
-    std::string search_term;
+
+    std::string term;
     char c;
-    while (read(STDIN_FILENO, &c, 1) == 1 && c != '\n') {
-        if (c == 127 || c == 8) { // Handle backspace
-            if (!search_term.empty()) {
-                search_term.pop_back();
-                std::cout << "\b \b" << std::flush; // Erase visually
+    while (read(STDIN_FILENO, &c, 1) == 1 && c != '\n' && c != '\r') {
+        if (c == 127 || c == 8) {
+            if (!term.empty()) {
+                term.pop_back();
+                std::cout << "\b \b" << std::flush;
             }
-        } else {
-            search_term.push_back(c);
-            std::cout << c << std::flush; // Echo character back
+        } else if (c >= 32) {
+            term.push_back(c);
+            std::cout << c << std::flush;
         }
     }
-    std::cout << "\r\n"; // Move to a new line after input
+    std::cout << "\n";
+    disable_raw();
 
-    disableRawMode(); // Give control back to the shell
-
-    // --- Search logic remains the same ---
-    if (search_term.empty()) return 0;
-
-    std::vector<std::string> history = read_history_file();
-    if (history.empty()) {
-        std::cout << "No match for search term in history" << std::endl;
+    if (term.empty()) {
         return 0;
     }
 
-    for (int i = history.size() - 1; i >= 0; --i) {
-        if (history[i] == search_term) {
-            std::cout << history[i] << std::endl;
+    std::vector<std::string> history = read_history();
+    if (history.empty()) {
+        std::cout << "No match for search term in history\n";
+        return 0;
+    }
+
+    // 1) most recent exact match
+    for (int i = static_cast<int>(history.size()) - 1; i >= 0; --i) {
+        if (history[static_cast<size_t>(i)] == term) {
+            std::cout << history[static_cast<size_t>(i)] << "\n";
             return 0;
         }
     }
 
-    std::string best_match_command = "";
-    int max_len = 0;
-    for (int i = history.size() - 1; i >= 0; --i) {
-        int len = longest_common_substring_length(history[i], search_term);
-        if (len > max_len) {
-            max_len = len;
-            best_match_command = history[i];
+    // 2) largest longest-common-substring, length > 2
+    std::string best;
+    int best_len = 0;
+    for (int i = static_cast<int>(history.size()) - 1; i >= 0; --i) {
+        int len = lcs_len(history[static_cast<size_t>(i)], term);
+        if (len > best_len) {
+            best_len = len;
+            best = history[static_cast<size_t>(i)];
         }
     }
-    
-    if (max_len > 2) {
-        std::cout << best_match_command << std::endl;
-    } else {
-        std::cout << "No match for search term in history" << std::endl;
-    }
 
+    if (best_len > 2) {
+        std::cout << best << "\n";
+    } else {
+        std::cout << "No match for search term in history\n";
+    }
     return 0;
 }
